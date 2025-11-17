@@ -40,6 +40,7 @@ const vscode = __importStar(require("vscode"));
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const ts = __importStar(require("typescript"));
+const ChangedAPIRatio_1 = require("./ChangedAPIRatio");
 // CRAI 기반 AI Approval Agent 확장 활성화 진입점 (전체 SF/SR/SD 계산을 트리거하는 엔트리)
 function activate(context) {
     console.log("AI Approval Agent is now active!");
@@ -781,10 +782,24 @@ async function runStaticPipeline(code, filename, _language) {
     const coreTouched = !!filename && /(\/|^)(core|service|domain)\//i.test(filename);
     const diffChangedLines = Math.min(200, Math.round(lineCount * 0.2));
     const schemaChanged = /\b(ALTER\s+TABLE|CREATE\s+TABLE|DROP\s+TABLE|MIGRATION)\b/i.test(code);
+    // SR / SD 스캔
     const pr = preciseResourceAndSecurityScan(code);
+    // 🔽 여기에 AST diff 기반 API 변경 탐지 삽입
+    let apiChanges = 0;
+    let totalApiCount = totalApis;
+    try {
+        // prevCode는 이후 구현될 “이전 버전 코드” (현재는 빈 문자열/또는 캐시 사용)
+        const prevCode = ""; // TODO: 나중에 git diff나 캐시 적용 가능
+        const diff = (0, ChangedAPIRatio_1.computeApiChangesUsingAST)(prevCode, code);
+        apiChanges = diff.apiChanges;
+        totalApiCount = diff.totalApis;
+    }
+    catch (err) {
+        console.warn("AST API diff 실패 → fallback to 0:", err);
+    }
     const metrics = {
-        apiChanges: 0,
-        totalApis,
+        apiChanges: apiChanges, // 🔽 기존 0이었던 부분이 실제 값으로 대체됨
+        totalApis: totalApiCount, // 🔽 기존 totalApis가 diff 기반으로 대체됨
         coreTouched,
         diffChangedLines,
         totalLines: Math.max(1, lineCount),
@@ -807,8 +822,8 @@ async function runStaticPipeline(code, filename, _language) {
         permRisk01: pr.permRisk01,
         _reasons: pr._reasons
     };
+    // SF: semanticF 적용
     try {
-        // SF: AST/호출 그래프 기반 Functionality 영향도(semanticF)를 계산해 StaticMetrics에 포함
         const sem = computeFSignalsSemantic(code, _language);
         if (sem) {
             metrics.semanticF = {
@@ -819,8 +834,7 @@ async function runStaticPipeline(code, filename, _language) {
             };
         }
     }
-    catch {
-    }
+    catch { }
     return metrics;
 }
 // FRD 각각의 내부 세부 신호에 대한 가중치 설정
