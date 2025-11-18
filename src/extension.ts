@@ -1,14 +1,20 @@
+// src/extension.ts
+
 // VS Code 확장에 필요한 기본 모듈 import (전체 파이프라인 공통 인프라, SF/SR/SD 모두의 기반)
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
 import * as ts from "typescript";
 
-//SF
+// SF
 import { computeApiChangesUsingAST } from "./SF/ChangedAPIRatio";
 import { isCoreModuleModified } from "./SF/CoreModuleModified";
 import { detectSchemaChange } from "./SF/SchemaChange";
 
+// SR
+import {BigOClass, analyzeAlgorithmComplexity, mapBigOTo01} from "./SR/AlgorithmComplexity";
+import { analyzeMemoryAllocationIncrease } from "./SR/MemoryAllocationIncrease";
+import { analyzeExternalCallAddition } from "./SR/ExternalCallAddition"; 
 
 // CRAI 기반 AI Approval Agent 확장 활성화 진입점 (전체 SF/SR/SD 계산을 트리거하는 엔트리)
 export function activate(context: vscode.ExtensionContext) {
@@ -74,7 +80,7 @@ function getCfg() {
     model: cfg.get<string>("aiApproval.ollama.model") || "llama3.1:8b",
     wF: cfg.get<number>("aiApproval.weights.functionality") ?? 0.40, // SF 가중치
     wR: cfg.get<number>("aiApproval.weights.resource") ?? 0.30,      // SR 가중치
-    wD: cfg.get<number>("aiApproval.weights.dependability") ?? 0.30     // SD 가중치
+    wD: cfg.get<number>("aiApproval.weights.dependability") ?? 0.30  // SD 가중치
   };
 }
 
@@ -660,7 +666,20 @@ function computeFSignalsSemantic(code: string, language: string) {
   } catch {
     return null;
   }
-  if (cg.nodes.size === 0) return { score: 0, details: { reason: "no nodes" } };
+
+  if (cg.nodes.size === 0) {
+    return {
+      score: 0,
+      details: {
+        impactedEntrypointRatio: 0,
+        reachableNodesRatio: 0,
+        centralityScore: 0,
+        nodes: 0,
+        entrypoints: 0,
+        reason: "no nodes"
+      }
+    };
+  }
 
   const reach = forwardReachable(cg, cg.changed);
   const reachableNodesRatio = Math.min(1, reach.size / Math.max(1, cg.nodes.size));
@@ -691,7 +710,6 @@ function computeFSignalsSemantic(code: string, language: string) {
 //  - SF: apiChanges, coreTouched, diffChangedLines, schemaChanged, semanticF
 //  - SR: bigO, cc, loopCount, loopDepthApprox, recursion, memAllocs, memBytesApprox, externalCalls, ioCalls
 //  - SD: cveSeverity01, libReputation01, licenseMismatch, permRisk01
-type BigOClass = "O(1)" | "O(log n)" | "O(n)" | "O(n log n)" | "O(n^2)" | "O(n^3)" | "unknown";
 type StaticMetrics = {
   apiChanges: number;
   totalApis: number;
@@ -732,21 +750,6 @@ type StaticMetrics = {
 // 0~1 범위로 값을 클램핑하는 가벼운 유틸 함수 (SF/SR/SD 공통)
 const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
 
-// Big-O 복잡도를 0~1 스케일로 매핑하는 함수
-//  → SR: 시간 복잡도(Big-O)를 Resource 차원(SR)의 신호로 사용
-function mapBigOTo01(bigO: BigOClass) {
-  const lut: { [k in BigOClass]: number } = {
-    "O(1)": 0.05,
-    "O(log n)": 0.15,
-    "O(n)": 0.20,
-    "O(n log n)": 0.35,
-    "O(n^2)": 0.70,
-    "O(n^3)": 0.90,
-    "unknown": 0.50
-  };
-  return lut[bigO] ?? 0.50;
-}
-
 // 포화형 스케일링을 위한 지수 기반 함수 (SR/SD에서 여러 신호를 정규화할 때 사용)
 const sat01 = (x: number, k: number) => clamp01(1 - Math.exp(-k * Math.max(0, x)));
 
@@ -763,79 +766,63 @@ function preciseResourceAndSecurityScan(
   const reasons: string[] = [];
   const lower = code.toLowerCase();
 
-  const branches = (code.match(/\b(if|else if|case|catch|&&|\|\||\?[:]|for|while|switch|try)\b/g) || []).length;
+  // Cyclomatic Complexity (분기 수 기반)
+  const branches =
+    (code.match(/\b(if|else if|case|catch|&&|\|\||\?[:]|for|while|switch|try)\b/g) || []).length;
   const cc = 1 + branches;
 
-  const loopCount = (code.match(/\b(for|while|forEach|map\(|reduce\()/g) || []).length;
-  const nestedLoop = /\b(for|while)\s*\([^)]*\)\s*{[^{}]*\b(for|while)\s*\(/s.test(code);
-  const tripleNested = /\b(for|while)[\s\S]{0,300}\b(for|while)[\s\S]{0,300}\b(for|while)/s.test(code);
-  const loopDepthApprox = tripleNested ? 3 : nestedLoop ? 2 : loopCount > 0 ? 1 : 0;
+  // 알고리즘 복잡도 분석 (Big-O, loop, recursion, sort, ReDoS 힌트 등)
+  const {
+    bigO,
+    loopCount,
+    loopDepthApprox,
+    recursion,
+    divideAndConquerHint,
+    sortHint,
+    regexDosHint,
+  } = analyzeAlgorithmComplexity(code);
 
-  const sortHint = /\b(sort\(|Collections\.sort|Arrays\.sort)\b/.test(code);
-  const recursion =
-    /function\s+([A-Za-z0-9_]+)\s*\([^)]*\)\s*{[\s\S]*?\b\1\s*\(/.test(code) ||
-    /([A-Za-z0-9_]+)\s*=\s*\([^)]*\)\s*=>[\s\S]*?\b\1\s*\(/.test(code);
-  const divideAndConquerHint = recursion && /\b(mid|merge|partition|divide|conquer)\b/i.test(code);
+  // 외부 호출 / IO 호출
+  const ext = analyzeExternalCallAddition(code);
+  const { externalCalls, ioCalls, reasons: extReasons } = ext;
+  if (extReasons.length) reasons.push(...extReasons);
 
-  const regexDosHint = /(a+)+|(\.\*){2,}|(.*){2,}/.test(code) && /(re\.compile|new\s+RegExp)/.test(code);
+  // 메모리 할당 증가 분석 (Buffer.alloc, new Array(n), 객체/배열 리터럴 등)
+  const mem = analyzeMemoryAllocationIncrease(code);
+  const { memAllocs, memBytesApprox, reasons: memReasons } = mem;
+  if (memReasons.length) reasons.push(...memReasons);
 
-  const externalCalls = (code.match(/\b(fetch|axios|request|http\.|https\.|jdbc|mongo|redis|sequelize|prisma)\b/gi) || [])
-    .length;
-  const ioCalls =
-    (code.match(/\bfs\.(read|write|append|unlink|readdir|chmod|chown)|open\(|readFileSync|writeFileSync\b/gi) || [])
-      .length;
-
-  let memBytesApprox = 0;
-  const inc = (n: number) => { memBytesApprox += Math.max(0, n); };
-
-  const bufAlloc = [...code.matchAll(/Buffer\.alloc\s*\(\s*(\d+)\s*\)/gi)];
-  bufAlloc.forEach((m) => inc(parseInt(m[1], 10)));
-
-  const arrAlloc = [...code.matchAll(/\bnew\s+Array\s*\(\s*(\d+)\s*\)|\bArray\s*\(\s*(\d+)\s*\)\.fill/gi)];
-  arrAlloc.forEach((m) => inc((parseInt(m[1] || m[2], 10) || 0) * 8));
-
-  const strLits = [...code.matchAll(/(["'`])([^"'`\\]|\\.){1,200}\1/g)];
-  strLits.forEach((m) => inc(m[0]?.length || 0));
-  const arrayLits = [...code.matchAll(/\[([^\[\]]{0,400})\]/g)];
-  arrayLits.forEach((m) => {
-    const elems = m[1].split(",").length || 0;
-    inc(elems * 16);
-  });
-  const objectLits = [...code.matchAll(/\{([^{}]{0,400})\}/g)];
-  objectLits.forEach((m) => {
-    const props = (m[1].match(/:/g) || []).length;
-    inc(props * 24);
-  });
-
-  const mapSet = (code.match(/\bnew\s+(Map|Set)\s*\(/g) || []).length;
-  inc(mapSet * 128);
-
+  // 권한/보안 관련 위험
   let permRisk = 0;
   if (/\b(child_process|exec\(|spawn\(|system\(|popen\(|subprocess\.)/i.test(code)) permRisk += 0.4;
   if (/\bfs\.(read|write|unlink|chmod|chown|readdir)\b/i.test(code)) permRisk += 0.3;
   if (/\bprocess\.env\b|secret|password|credential/i.test(lower)) permRisk += 0.3;
   permRisk = clamp01(permRisk);
 
+  // 라이브러리 평판 (간단한 힌트만 유지)
   let libRep = 0.65;
-  if (/vulnerable[_-]?pkg[_-]?2023/.test(lower)) libRep = Math.min(libRep, 0.1);
+  if (/vulnerable[_-]?pkg[_-]?2023/.test(lower)) {
+    libRep = Math.min(libRep, 0.1);
+  }
 
-  let bigO: BigOClass = "unknown";
-  if (loopDepthApprox >= 3) bigO = "O(n^3)";
-  else if (loopDepthApprox === 2) bigO = "O(n^2)";
-  else if (sortHint || divideAndConquerHint) bigO = "O(n log n)";
-  else if (loopDepthApprox === 1 || recursion) bigO = "O(n)";
-  else bigO = "unknown";
-
-  // SD: 정규식 기반 + 벡터 기반 CVE 위험도 결합 → cveSeverity01
+  // D: 정규식 기반 + 벡터 기반 CVE 위험도 결합 → cveSeverity01
   const regexRules = regexHeuristicScoreFromDB(code, RULE_DB);
   const vectorRules = vectorCveScan(code);
-  const cveSeverity01 = clamp01(1 - (1 - regexRules.severity01) * (1 - vectorRules.aggregatedSeverity01));
+  const cveSeverity01 = clamp01(
+    1 - (1 - regexRules.severity01) * (1 - vectorRules.aggregatedSeverity01)
+  );
 
   if (regexRules.matches.length) {
-    reasons.push(...regexRules.matches.map((m) => `regex:${m.id} sev=${m.severity01.toFixed(2)}`));
+    reasons.push(
+      ...regexRules.matches.map((m) => `regex:${m.id} sev=${m.severity01.toFixed(2)}`)
+    );
   }
   if (vectorRules.matches.length) {
-    reasons.push(...vectorRules.matches.map((m) => `vector:${m.id} sim=${m.similarity.toFixed(2)} sev=${m.severity01.toFixed(2)}`));
+    reasons.push(
+      ...vectorRules.matches.map(
+        (m) => `vector:${m.id} sim=${m.similarity.toFixed(2)} sev=${m.severity01.toFixed(2)}`
+      )
+    );
   }
   if (regexDosHint) reasons.push("ReDoS pattern suspected");
   if (divideAndConquerHint) reasons.push("Divide-and-conquer recursion hint");
@@ -850,15 +837,18 @@ function preciseResourceAndSecurityScan(
     divideAndConquerHint,
     sortHint,
     regexDosHint,
-    memAllocs: bufAlloc.length + arrAlloc.length + arrayLits.length + objectLits.length + mapSet,
+
+    memAllocs,
     memBytesApprox,
     externalCalls,
     ioCalls,
+
     cveSeverity01,
     libReputation01: libRep,
     licenseMismatch: false,
     permRisk01: permRisk,
-    _reasons: reasons
+
+    _reasons: reasons,
   };
 }
 
