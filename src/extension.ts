@@ -3,7 +3,12 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
 import * as ts from "typescript";
-import { computeApiChangesUsingAST } from "./ChangedAPIRatio";
+
+//SF
+import { computeApiChangesUsingAST } from "./SF/ChangedAPIRatio";
+import { isCoreModuleModified } from "./SF/CoreModuleModified";
+import { detectSchemaChange } from "./SF/SchemaChange";
+
 
 // CRAI 기반 AI Approval Agent 확장 활성화 진입점 (전체 SF/SR/SD 계산을 트리거하는 엔트리)
 export function activate(context: vscode.ExtensionContext) {
@@ -865,9 +870,9 @@ async function runStaticPipeline(code: string, filename: string | null | undefin
   const lineCount = (code.match(/\n/g) || []).length + 1;
 
   const totalApis = Math.max(1, (code.match(/\bexport\s+(function|class|interface|type|const|let|var)\b/g) || []).length || 5);
-  const coreTouched = !!filename && /(\/|^)(core|service|domain)\//i.test(filename);
+  const coreTouched = isCoreModuleModified(filename);
   const diffChangedLines = Math.min(200, Math.round(lineCount * 0.2));
-  const schemaChanged = /\b(ALTER\s+TABLE|CREATE\s+TABLE|DROP\s+TABLE|MIGRATION)\b/i.test(code);
+  const { schemaChanged, reason: schemaReason } = detectSchemaChange(code);
 
   // SR / SD 스캔
   const pr = preciseResourceAndSecurityScan(code);

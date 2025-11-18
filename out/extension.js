@@ -40,7 +40,10 @@ const vscode = __importStar(require("vscode"));
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const ts = __importStar(require("typescript"));
-const ChangedAPIRatio_1 = require("./ChangedAPIRatio");
+//SF
+const ChangedAPIRatio_1 = require("./SF/ChangedAPIRatio");
+const CoreModuleModified_1 = require("./SF/CoreModuleModified");
+const SchemaChange_1 = require("./SF/SchemaChange");
 // CRAI 기반 AI Approval Agent 확장 활성화 진입점 (전체 SF/SR/SD 계산을 트리거하는 엔트리)
 function activate(context) {
     console.log("AI Approval Agent is now active!");
@@ -779,9 +782,9 @@ function preciseResourceAndSecurityScan(code) {
 async function runStaticPipeline(code, filename, _language) {
     const lineCount = (code.match(/\n/g) || []).length + 1;
     const totalApis = Math.max(1, (code.match(/\bexport\s+(function|class|interface|type|const|let|var)\b/g) || []).length || 5);
-    const coreTouched = !!filename && /(\/|^)(core|service|domain)\//i.test(filename);
+    const coreTouched = (0, CoreModuleModified_1.isCoreModuleModified)(filename);
     const diffChangedLines = Math.min(200, Math.round(lineCount * 0.2));
-    const schemaChanged = /\b(ALTER\s+TABLE|CREATE\s+TABLE|DROP\s+TABLE|MIGRATION)\b/i.test(code);
+    const { schemaChanged, reason: schemaReason } = (0, SchemaChange_1.detectSchemaChange)(code);
     // SR / SD 스캔
     const pr = preciseResourceAndSecurityScan(code);
     // 🔽 여기에 AST diff 기반 API 변경 탐지 삽입
