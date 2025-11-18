@@ -2,8 +2,6 @@
 
 // VS Code 확장에 필요한 기본 모듈 import (전체 파이프라인 공통 인프라, SF/SR/SD 모두의 기반)
 import * as vscode from "vscode";
-import * as fs from "fs";
-import * as path from "path";
 import * as ts from "typescript";
 
 // SF
@@ -12,26 +10,32 @@ import { isCoreModuleModified } from "./SF/CoreModuleModified";
 import { detectSchemaChange } from "./SF/SchemaChange";
 
 // SR
-import {BigOClass, analyzeAlgorithmComplexity, mapBigOTo01} from "./SR/AlgorithmComplexity";
+import { BigOClass, analyzeAlgorithmComplexity, mapBigOTo01 } from "./SR/AlgorithmComplexity";
 import { analyzeMemoryAllocationIncrease } from "./SR/MemoryAllocationIncrease";
-import { analyzeExternalCallAddition } from "./SR/ExternalCallAddition"; 
+import { analyzeExternalCallAddition } from "./SR/ExternalCallAddition";
+
+// SD 
+import * as CVE from "./SD/CVE_Vulnerabilities";
+import { analyzeLibraryReputationFromCode } from "./SD/LibraryReputation";
+import { analyzeSensitivePermissionUsageFromCode } from "./SD/SensitivePermissionUsage";
+
 
 // CRAI 기반 AI Approval Agent 확장 활성화 진입점 (전체 SF/SR/SD 계산을 트리거하는 엔트리)
 export function activate(context: vscode.ExtensionContext) {
   console.log("AI Approval Agent is now active!");
 
   // SD: CVE 룰 DB 로드(정규식 기반) → Dependability 위험(SD)에 사용
-  RULE_DB = loadGeneratedRuleDb(context);
-  if (RULE_DB.length) {
-    console.log(`[CVE] Loaded generated RULE DB: ${RULE_DB.length} signature(s)`);
+  const ruleDb = CVE.loadGeneratedRuleDb(context);
+  if (ruleDb.length) {
+    console.log(`[CVE] Loaded generated RULE DB: ${ruleDb.length} signature(s)`);
   } else {
     console.warn("[CVE] WARNING: generated_cve_rules.json not found or empty. Regex scoring -> 0");
   }
 
   // SD: CVE 벡터 DB 로드(코사인 기반) → Dependability 위험(SD)에 사용
-  DYN_CVE_DB = loadGeneratedCveDb(context);
-  if (DYN_CVE_DB.length) {
-    console.log(`[CVE] Loaded generated VECTOR DB: ${DYN_CVE_DB.length} signature(s)`);
+  const vecDb = CVE.loadGeneratedCveDb(context);
+  if (vecDb.length) {
+    console.log(`[CVE] Loaded generated VECTOR DB: ${vecDb.length} signature(s)`);
   } else {
     console.warn("[CVE] WARNING: generated_cve_db.json not found or empty. Vector scoring -> 0");
   }
@@ -186,8 +190,8 @@ function wireMessages(webview: vscode.Webview) {
             const scored = scoreFromVector(fusedVector, { wF, wR, wD });
 
             const dbWarns: string[] = [];
-            if (!RULE_DB.length) dbWarns.push("generated_cve_rules.json not loaded → regex score = 0");
-            if (!DYN_CVE_DB.length) dbWarns.push("generated_cve_db.json not loaded → vector score = 0");
+            if (!CVE.RULE_DB.length) dbWarns.push("generated_cve_rules.json not loaded → regex score = 0");
+            if (!CVE.DYN_CVE_DB.length) dbWarns.push("generated_cve_db.json not loaded → vector score = 0");
 
             // Webview로 SF/SR/SD와 CRAI 구성요소를 모두 전달
             webview.postMessage({
@@ -285,231 +289,6 @@ async function chatWithOllamaAndReturn(
     }
   }
   return full;
-}
-
-// CVE 정규식 룰 DB, 토크나이저 룰, 벡터 시그니처 타입 정의
-//  → Dependability 차원(SD)에서 취약점 및 의존성 위험을 수치화하기 위한 구조
-type Rule = { rx: string; w: number; note?: string; token?: string; support?: number; idf?: number };
-type TokenizerRule = { name?: string; rx: string; w?: number };
-type Sig = {
-  id: string;
-  title: string;
-  baseSeverity: number;
-  rules: Rule[];
-  cooccur?: { all: string[]; bonus: number }[];
-  proximity?: { a: string; b: string; lines: number; bonus: number }[];
-  negatives?: { rx: string; penalty: number; note?: string }[];
-  group?: string;
-  support_docs?: number;
-  tokenizer_rules?: TokenizerRule[];
-};
-
-type CveVectorSig = {
-  id: string;
-  title: string;
-  tokens: Record<string, number>;
-  baseSeverity: number;
-  notes?: string;
-  token_regex?: TokenizerRule[];
-};
-
-// 동적으로 로드된 CVE 룰/벡터 DB 전역 상태 (SD: Dependability 위험 계산용 핵심 데이터)
-let RULE_DB: Sig[] = [];
-let DYN_CVE_DB: CveVectorSig[] = [];
-
-// generated_cve_rules.json 파일을 로드하는 함수 (SD: 정규식 기반 취약점 룰 세트 초기화)
-function loadGeneratedRuleDb(ctx?: vscode.ExtensionContext): Sig[] {
-  try {
-    const base = ctx ? ctx.extensionUri.fsPath : process.cwd();
-    const p = path.join(base, "cve_data", "generated_cve_rules.json");
-    if (!fs.existsSync(p)) return [];
-    const raw = fs.readFileSync(p, "utf8");
-    const obj = JSON.parse(raw);
-    const arr = obj?.signatures as Sig[] | undefined;
-    (RULE_DB as any) = arr || [];
-    (RULE_DB as any).tokenizer_rules = obj?.tokenizer_rules || [];
-    return Array.isArray(arr) ? arr : [];
-  } catch (e) {
-    console.error("[CVE] loadGeneratedRuleDb error:", e);
-    return [];
-  }
-}
-
-// generated_cve_db.json 벡터 DB를 로드하는 함수 (SD: 벡터 기반 취약점 시그니처 초기화)
-function loadGeneratedCveDb(ctx?: vscode.ExtensionContext): CveVectorSig[] {
-  try {
-    const base = ctx ? ctx.extensionUri.fsPath : process.cwd();
-    const p = path.join(base, "cve_data", "generated_cve_db.json");
-    if (!fs.existsSync(p)) return [];
-    const raw = fs.readFileSync(p, "utf8");
-    const arr = JSON.parse(raw) as CveVectorSig[];
-    return Array.isArray(arr) ? arr : [];
-  } catch (e) {
-    console.error("[CVE] loadGeneratedCveDb error:", e);
-    return [];
-  }
-}
-
-// 현재 사용 가능한 벡터 DB를 반환하는 헬퍼 (SD: Dependability 위험 계산에서 사용하는 시그니처 집합)
-function getSigDB(): CveVectorSig[] {
-  return Array.isArray(DYN_CVE_DB) ? DYN_CVE_DB : [];
-}
-
-// 룰/벡터 DB에서 토큰화에 쓸 정규식 패턴을 수집하는 함수
-//  → SD: 코드에서 취약점 패턴 토큰을 추출하기 위한 토크나이저 정의
-function collectTokenizerPatterns() {
-  const globalRules: TokenizerRule[] = [];
-  const rootRules = (RULE_DB as any)?.tokenizer_rules as TokenizerRule[] | undefined;
-  if (Array.isArray(rootRules)) globalRules.push(...rootRules);
-
-  for (const sig of RULE_DB || []) {
-    const arr = sig.tokenizer_rules as TokenizerRule[] | undefined;
-    if (Array.isArray(arr)) globalRules.push(...arr);
-  }
-
-  const perSigRegex: TokenizerRule[] = [];
-  for (const sig of DYN_CVE_DB || []) {
-    const arr = sig.token_regex as TokenizerRule[] | undefined;
-    if (Array.isArray(arr)) perSigRegex.push(...arr);
-  }
-
-  return { globalRules, perSigRegex };
-}
-
-// 코드 문자열을 CVE 토큰 벡터(가중치 포함)로 변환하는 함수
-//  → SD: 코드에서 발견된 취약점 관련 토큰을 벡터로 표현하여 Dependability 위험(SD) 계산에 사용
-function vectorizeCodeToTokens(code: string): Record<string, number> {
-  const lower = code.toLowerCase();
-  const feats: Record<string, number> = {};
-  const add = (k: string, w = 1) => { feats[k] = (feats[k] ?? 0) + w; };
-
-  const sigDB = getSigDB();
-  if (sigDB.length) {
-    for (const sig of sigDB) {
-      const tokTable = sig.tokens || {};
-      for (const [tok, wRaw] of Object.entries(tokTable)) {
-        const w = typeof wRaw === "number" ? wRaw : 1;
-        if (!tok) continue;
-        const esc = tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const wordLike = /^[A-Za-z0-9_]+$/.test(tok);
-        const re = wordLike ? new RegExp(`\\b${esc}\\b`, "i") : new RegExp(esc, "i");
-        if (re.test(lower)) add(tok, w);
-      }
-    }
-  }
-
-  const { globalRules, perSigRegex } = collectTokenizerPatterns();
-  for (const r of [...globalRules, ...perSigRegex]) {
-    if (!r?.rx) continue;
-    try {
-      const re = new RegExp(r.rx, "i");
-      if (re.test(lower)) add(r.name || r.rx, r.w ?? 1);
-    } catch {
-    }
-  }
-
-  return feats;
-}
-
-// 두 벡터 간 코사인 유사도를 계산하는 함수
-//  → SD: 코드 토큰 벡터 vs CVE 시그니처 벡터 유사도를 통해 Dependability 위험 정도 추정
-function cosineSim(a: Record<string, number>, b: Record<string, number>): number {
-  let dot = 0, na = 0, nb = 0;
-  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  for (const k of keys) {
-    const va = a[k] ?? 0;
-    const vb = b[k] ?? 0;
-    dot += va * vb;
-    na += va * va;
-    nb += vb * vb;
-  }
-  if (!na || !nb) return 0;
-  return dot / (Math.sqrt(na) * Math.sqrt(nb));
-}
-
-// 코드 벡터와 CVE 벡터 DB를 비교해 위험도 및 상위 매칭 결과를 산출하는 함수
-//  → SD: D 차원에서 cveSeverity01에 반영되는 "벡터 기반 취약점 위험" 계산
-function vectorCveScan(code: string) {
-  const DB = getSigDB();
-  if (!DB.length) return { aggregatedSeverity01: 0, matches: [] as any[] };
-
-  const codeVec = vectorizeCodeToTokens(code);
-  const results = DB.map((sig) => {
-    const sim = cosineSim(codeVec, sig.tokens || {});
-    const base = clamp01(sig.baseSeverity ?? 0.7);
-    const sev = clamp01(base * Math.min(1, Math.pow(Math.max(0, sim), 0.8) * 1.2));
-    return { id: sig.id, title: sig.title, similarity: sim, severity01: sev, notes: sig.notes ?? "" };
-  }).sort((a, b) => b.severity01 - a.severity01);
-
-  const topK = results.slice(0, 3);
-  let agg = 0;
-  for (const r of topK) agg = 1 - (1 - agg) * (1 - r.severity01);
-
-  return { aggregatedSeverity01: Math.min(1, agg), matches: results.filter((r) => r.similarity > 0.15).slice(0, 5) };
-}
-
-// 정규식 룰 DB를 이용해 CVE 위험도를 계산하는 함수
-//  → SD: D 차원에서 cveSeverity01에 반영되는 "정규식 기반 취약점 위험" 계산
-function regexHeuristicScoreFromDB(code: string, db: Sig[]) {
-  if (!db?.length) return { severity01: 0, matches: [] as any[] };
-
-  const lower = code.toLowerCase();
-  const lines = lower.split(/\r?\n/);
-  const RX = (rx: string) => new RegExp(rx, "i");
-
-  const results = db.map((sig) => {
-    let raw = 0;
-    const matched: string[] = [];
-
-    for (const r of sig.rules || []) {
-      try {
-        const re = RX(r.rx);
-        if (re.test(lower)) {
-          const w = (r.w ?? 1) * (r.idf ?? 1);
-          raw += w;
-          matched.push(r.token || r.rx);
-        }
-      } catch {
-      }
-    }
-
-    sig.cooccur?.forEach((c) => {
-      const ok = (c.all || []).every((rx) => { try { return RX(rx).test(lower); } catch { return false; } });
-      if (ok) raw += c.bonus || 0;
-    });
-
-    sig.proximity?.forEach((p) => {
-      try {
-        const A = RX(p.a), B = RX(p.b);
-        const L = p.lines ?? 5;
-        for (let i = 0; i < lines.length; i++) {
-          if (!A.test(lines[i])) continue;
-          for (let d = -L; d <= L; d++) {
-            const j = i + d;
-            if (j >= 0 && j < lines.length && B.test(lines[j])) { raw += p.bonus || 0; d = L + 1; break; }
-          }
-        }
-      } catch {
-      }
-    });
-
-    sig.negatives?.forEach((n) => { try { if (RX(n.rx).test(lower)) raw -= n.penalty || 0; } catch {} });
-
-    const base = clamp01(sig.baseSeverity ?? 0.7);
-    const supBoost = Math.min(0.10, (Math.max(0, sig.support_docs ?? 0) / 1000));
-    const sev = clamp01((base * (1 + supBoost)) * (1 - Math.exp(-3 * Math.max(0, raw))));
-
-    return { id: sig.id, title: sig.title, severity01: sev, matched, raw: Number(Math.max(0, raw).toFixed(3)) };
-  }).sort((a, b) => b.severity01 - a.severity01);
-
-  const topK = results.slice(0, 3);
-  let agg = 0;
-  for (const r of topK) agg = 1 - (1 - agg) * (1 - r.severity01);
-
-  return {
-    severity01: clamp01(agg),
-    matches: results.filter((r) => r.severity01 > 0.15).slice(0, 5)
-  };
 }
 
 // AST 기반 호출 그래프를 표현하기 위한 타입 및 구조체 정의
@@ -708,7 +487,7 @@ function computeFSignalsSemantic(code: string, language: string) {
 
 // 정적 분석 결과를 담는 메인 메트릭 타입 정의
 //  - SF: apiChanges, coreTouched, diffChangedLines, schemaChanged, semanticF
-//  - SR: bigO, cc, loopCount, loopDepthApprox, recursion, memAllocs, memBytesApprox, externalCalls, ioCalls
+//  - SR: bigO, cc, loopCount, loopDepthApprox, recursion, divideAndConquerHint, sortHint, regexDosHint, memAllocs, memBytesApprox, externalCalls, ioCalls
 //  - SD: cveSeverity01, libReputation01, licenseMismatch, permRisk01
 type StaticMetrics = {
   apiChanges: number;
@@ -764,7 +543,6 @@ function preciseResourceAndSecurityScan(
   "apiChanges" | "totalApis" | "coreTouched" | "diffChangedLines" | "totalLines" | "schemaChanged" | "semanticF"
 > {
   const reasons: string[] = [];
-  const lower = code.toLowerCase();
 
   // Cyclomatic Complexity (분기 수 기반)
   const branches =
@@ -792,22 +570,19 @@ function preciseResourceAndSecurityScan(
   const { memAllocs, memBytesApprox, reasons: memReasons } = mem;
   if (memReasons.length) reasons.push(...memReasons);
 
-  // 권한/보안 관련 위험
-  let permRisk = 0;
-  if (/\b(child_process|exec\(|spawn\(|system\(|popen\(|subprocess\.)/i.test(code)) permRisk += 0.4;
-  if (/\bfs\.(read|write|unlink|chmod|chown|readdir)\b/i.test(code)) permRisk += 0.3;
-  if (/\bprocess\.env\b|secret|password|credential/i.test(lower)) permRisk += 0.3;
-  permRisk = clamp01(permRisk);
+  // 권한/보안 관련 위험 (별도 모듈로 분리된 Sensitive Permission Usage 스캐너 사용)
+  const perm = analyzeSensitivePermissionUsageFromCode(code);
+  const permRisk = perm.permRisk01;
+  if (perm.reasons.length) reasons.push(...perm.reasons);
 
-  // 라이브러리 평판 (간단한 힌트만 유지)
-  let libRep = 0.65;
-  if (/vulnerable[_-]?pkg[_-]?2023/.test(lower)) {
-    libRep = Math.min(libRep, 0.1);
-  }
+  // 라이브러리 평판 (이름 기반 취약 패키지 탐지만 부분 구현)
+  const lib = analyzeLibraryReputationFromCode(code);
+  const libRep = lib.reputation01;
+  if (lib.reasons.length) reasons.push(...lib.reasons);
 
   // D: 정규식 기반 + 벡터 기반 CVE 위험도 결합 → cveSeverity01
-  const regexRules = regexHeuristicScoreFromDB(code, RULE_DB);
-  const vectorRules = vectorCveScan(code);
+  const regexRules = CVE.regexHeuristicScoreFromDB(code, CVE.RULE_DB);
+  const vectorRules = CVE.vectorCveScan(code);
   const cveSeverity01 = clamp01(
     1 - (1 - regexRules.severity01) * (1 - vectorRules.aggregatedSeverity01)
   );
@@ -867,7 +642,7 @@ async function runStaticPipeline(code: string, filename: string | null | undefin
   // SR / SD 스캔
   const pr = preciseResourceAndSecurityScan(code);
 
-  // 🔽 여기에 AST diff 기반 API 변경 탐지 삽입
+  // 여기에 AST diff 기반 API 변경 탐지 삽입
   let apiChanges = 0;
   let totalApiCount = totalApis;
 
@@ -884,8 +659,8 @@ async function runStaticPipeline(code: string, filename: string | null | undefin
   }
 
   const metrics: StaticMetrics = {
-    apiChanges: apiChanges,   // 🔽 기존 0이었던 부분이 실제 값으로 대체됨
-    totalApis: totalApiCount, // 🔽 기존 totalApis가 diff 기반으로 대체됨
+    apiChanges: apiChanges,   // 기존 0이었던 부분이 실제 값으로 대체됨
+    totalApis: totalApiCount, // 기존 totalApis가 diff 기반으로 대체됨
     coreTouched,
     diffChangedLines,
     totalLines: Math.max(1, lineCount),
