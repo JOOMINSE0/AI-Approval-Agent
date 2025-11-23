@@ -1,5 +1,3 @@
-// src/AlgorithmComplexity.ts
-
 // 알고리즘 복잡도 클래스 타입
 export type BigOClass =
   | "O(1)"

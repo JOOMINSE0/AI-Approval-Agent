@@ -1,5 +1,4 @@
 "use strict";
-// src/SR/MemoryAllocationIncrease.ts
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.analyzeMemoryAllocationIncrease = analyzeMemoryAllocationIncrease;
 /**

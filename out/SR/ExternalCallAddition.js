@@ -1,5 +1,4 @@
 "use strict";
-// src/SR/ExternalCallAddition.ts
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.analyzeExternalCallAddition = analyzeExternalCallAddition;
 /**

@@ -1,5 +1,4 @@
 "use strict";
-// src/AlgorithmComplexity.ts
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.mapBigOTo01 = mapBigOTo01;
 exports.analyzeAlgorithmComplexity = analyzeAlgorithmComplexity;

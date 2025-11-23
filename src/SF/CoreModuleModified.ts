@@ -1,6 +1,3 @@
-// src/CoreModuleModified.ts
-// "Core Module Modified" 신호만 담당하는 작은 유틸 모듈
-
 /**
  * 코어 모듈 파일인지 여부를 판별한다.
  *

@@ -1,5 +1,3 @@
-// src/SR/MemoryAllocationIncrease.ts
-
 export type MemoryAllocationMetrics = {
   memAllocs: number;       // 메모리 할당 패턴 개수
   memBytesApprox: number;  // 대략적인 바이트 추정치

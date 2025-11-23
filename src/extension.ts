@@ -1,5 +1,3 @@
-// src/extension.ts
-
 // VS Code 확장에 필요한 기본 모듈 import (전체 파이프라인 공통 인프라, SF/SR/SD 모두의 기반)
 import * as vscode from "vscode";
 import * as ts from "typescript";

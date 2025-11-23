@@ -1,6 +1,4 @@
 "use strict";
-// src/CoreModuleModified.ts
-// "Core Module Modified" 신호만 담당하는 작은 유틸 모듈
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.isCoreModuleModified = isCoreModuleModified;
 /**

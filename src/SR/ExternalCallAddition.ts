@@ -1,5 +1,3 @@
-// src/SR/ExternalCallAddition.ts
-
 export type ExternalCallMetrics = {
   externalCalls: number;   // HTTP·DB 등 외부 호출 개수
   ioCalls: number;         // fs.* 등 파일 I/O 호출 개수
